@@ -1,0 +1,423 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# 
+# Author: Roman Belyakovsky
+# 2017
+# BSD license
+# 
+
+from __future__ import print_function, unicode_literals
+from curtsies import Input
+import getpass
+import json
+import keyring
+import logging
+import os
+import pyotp
+import re
+import requests
+import signal
+import struct
+import subprocess
+import sys
+import thread
+import time
+import urllib
+import urlparse
+import websocket
+import yaml
+
+mode = ""
+hostname = ""
+
+if len(sys.argv) == 1:
+    mode = "list"
+elif len(sys.argv) == 2:
+    mode="ssh"
+    hostname=str(sys.argv[1])
+else:
+    sys.stderr.write("Usage: %s [hostname]\n" % sys.argv[0])
+    sys.exit(1)
+
+logging.basicConfig(level=logging.ERROR, format='%(asctime)s %(message)s')
+logging.debug('Starting in %s mode...' % mode)
+
+confdir = "~/.centrify"
+confpath = "%s/sshit.yml" % confdir
+
+CENTRIFYUSER = None
+try:
+    stream = open(os.path.expanduser(confpath), "r")
+    conf = yaml.load(stream)
+    CENTRIFYUSER = conf['username']
+except:
+    logging.debug('Failed to read username from %s' % confpath)
+
+if not CENTRIFYUSER:
+    CENTRIFYUSER = raw_input('Username: ').strip()
+    try:
+        if not os.path.exists(os.path.expanduser(confdir)):
+            os.makedirs(os.path.expanduser(confdir))
+        with open(os.path.expanduser(confpath), 'w') as outfile:
+            yaml.dump(
+                      {str("username"): CENTRIFYUSER},
+                      outfile,
+                      default_flow_style=False)
+    except:
+        logging.debug('Failed to write username to %s' % confpath)
+
+global screenheight
+global screenwidth
+
+def get_terminal_size_linux():
+    def ioctl_GWINSZ(fd):
+        try:
+            import fcntl
+            import termios
+            cr = struct.unpack('hh',
+                               fcntl.ioctl(fd, termios.TIOCGWINSZ, '1234'))
+            return cr
+        except:
+            pass
+    cr = ioctl_GWINSZ(0) or ioctl_GWINSZ(1) or ioctl_GWINSZ(2)
+    if not cr:
+        try:
+            fd = os.open(os.ctermid(), os.O_RDONLY)
+            cr = ioctl_GWINSZ(fd)
+            os.close(fd)
+        except:
+            pass
+    if not cr:
+        try:
+            cr = (os.environ['LINES'], os.environ['COLUMNS'])
+        except:
+            return 36,96 # default
+    return int(cr[1]), int(cr[0])
+
+def printc(str):
+    sys.stdout.write(str)
+    sys.stdout.flush()
+
+def getPass():
+    password = keyring.get_password(keyring_service, CENTRIFYUSER )
+    if not password:
+        password = getpass.getpass("Enter password for '%s':" % keyring_service)
+        try:
+            keyring.set_password(keyring_service, CENTRIFYUSER, password)
+        except keyring.errors.PasswordSetError:
+            logging.error("failed to store password")
+    return password
+    pass
+
+def getQRSecret():
+    service="2f%s" % centrify_address
+    qrsecret = keyring.get_password(service, CENTRIFYUSER)
+    if not qrsecret:
+        output = subprocess.check_output('zbarimg -q qr.gif', shell=True).replace('\n',' ').strip()
+        qrsecret=urlparse.parse_qs(urlparse.urlparse(output).query)['secret'][0]
+        keyring.set_password(service, CENTRIFYUSER, qrsecret)
+    return qrsecret
+    pass
+
+
+def getToken():
+    if totp == None:
+        return raw_input('Enter Verification Code: ').strip()
+    else:
+        expire = 30 - (time.time() % 30)
+        if expire < 2:
+            time.sleep(expire)
+            return getToken()
+        else:
+            return str(totp.now())
+
+session = requests.Session()
+logging.debug("Touching API")
+r = session.get("https://cloud.centrify.com/my")
+
+antixss = r.cookies['antixss'].split('-')[-1]
+logging.debug("Request company login url")
+
+r = session.post(
+    "https://cloud.centrify.com/Security/StartAuthentication?antixss=%s" % antixss,
+    json={
+        "TenantId":"",
+        "User": CENTRIFYUSER,
+        "Version":"1.0",
+        "AssociatedEntityType":"Portal",
+        "AssociatedEntityName":"Portal",
+        "ExtIdpAuthChallengeState":""
+    })
+
+antixss = r.cookies['antixss'].split('-')[-1]
+centrify_address = r.json()['Result']['PodFqdn']
+keyring_service = centrify_address
+
+totp = None
+try:
+    totp = pyotp.TOTP(getQRSecret())
+except:
+    pass
+
+logging.debug("Get company details")
+r = session.post(
+    "https://" + centrify_address + "/Security/StartAuthentication?antixss=%s" % antixss,
+    json={
+        "TenantId":"",
+        "User": CENTRIFYUSER,
+        "Version":"1.0",
+        "AssociatedEntityType":"Portal",
+        "AssociatedEntityName":"Portal",
+        "ExtIdpAuthChallengeState":""
+    })
+
+antixss = r.cookies['antixss'].split('-')[-1]
+sessionID = r.json()['Result']['SessionId']
+tenantId = r.json()['Result']['TenantId']
+
+passMechanismId = ""
+oauthMechanismId = ""
+
+for challange in r.json()['Result']['Challenges']:
+    for mechanism in challange['Mechanisms']:
+        if mechanism['Name'] == "UP":
+            passMechanismId = mechanism['MechanismId']
+        elif mechanism['Name'] == "OATH":
+            oauthMechanismId = mechanism['MechanismId']
+
+logging.debug("Send login data")
+r = session.post(
+    "https://" + centrify_address + "/Security/AdvanceAuthentication?antixss=%s" % antixss,
+    json={
+    "TenantId": tenantId,
+    "SessionId": sessionID,
+    "PersistentLogin": True,
+    "MultipleOperations": [
+        {
+            "MechanismId": passMechanismId,
+            "Answer": getPass(),
+            "Action": "Answer"
+        },
+        {
+            "MechanismId": oauthMechanismId,
+            "Answer": getToken(),
+            "Action": "Answer"
+        }
+    ]
+   }
+)
+
+antixss = r.cookies['antixss'].split('-')[-1]
+
+logging.debug("Get list of apps")
+r = session.post(
+    "https://" + centrify_address + "/uprest/GetUPData?antixss=%s" % antixss,
+    json={
+        "force": True,
+    }
+)
+
+antixss = r.cookies['antixss'].split('-')[-1]
+
+apps=r.json()['Result']['Apps']
+        
+if mode == "list":
+    for app in apps:
+        if 'CpsSessionType' in app and app['CpsSessionType'] == "Ssh":
+            if 'CpsHostname' in app:
+                print(app['CpsHostname'])
+    sys.exit(0)
+
+
+try:
+    app=(app for app in apps if 'CpsSessionType' in app and app['CpsSessionType'] == "Ssh" and app["CpsHostname"] == hostname).next()
+except:
+    sys.stderr.write("Host %s not found\n" % hostname)
+    sys.exit(1)
+
+appkey=urlparse.parse_qs(urlparse.urlparse(app['Url']).query)['pvacct'][0]
+ts = int(time.time() * 1000)
+logging.debug("negotiate")
+r = session.get(
+     "https://" + centrify_address + "/signalr/negotiate",
+     params={
+         "clientProtocol": 1.5,
+         "connectionData": '[{"name":"sshtermhub"}]',
+         "_": "%d" % ts,
+     }
+  )
+ts += 1
+connectiontoken = urllib.quote(r.json()['ConnectionToken'])
+# antixss = r.cookies['antixss'].split('-')[-1]
+
+logging.debug("Select from vault")
+r = session.post(
+    "https://" + centrify_address + "/RedRock/query?antixss=%s" % antixss,
+    json={
+        "Script":"select * from VaultAccount where ID = '%s'" % appkey,
+        "Args": {
+            "PageNumber": 1,
+            "PageSize": 100000,
+            "Limit": 100000,
+            "SortBy": "",
+            "direction": "False",
+            "Caching": -1
+        }
+    }
+)
+# antixss = r.cookies['antixss'].split('-')[-1]
+
+# apphost=r.json()['Result']['Results'][0]['Row']['Host']
+
+logging.debug("jumpterm")
+r = session.get(
+     "https://" + centrify_address + "/serversession/jumpterm",
+     params={
+         "mode": 1,
+         "pvacct": appkey,
+         "hostname": hostname,
+         "height": 480,
+         "width": 640,
+         "debug": False,
+         "token": None,
+         "title": "Login session %s" % hostname,
+     }
+  )
+# antixss = r.cookies['antixss'].split('-')[-1]
+
+# import lxml.etree
+# js=lxml.etree.HTML(r.content).find('.//head/script[3]').text
+# jsonCode = js.partition('=')[2].strip()
+# json.loads(jsonCode)
+
+# serverConfigString=re.search('ServerConfig\s+=\s+({.*?});', r.content, re.DOTALL).group(1)
+challengeSessionId=re.search('challengeSessionId:\s+"([^"]*)"', r.content).group(1)
+
+
+logging.debug("request web socket start")
+
+r = session.get(
+     'https://' + centrify_address + '/signalr/start?transport=webSockets&clientProtocol=1.5&connectionToken=' + connectiontoken + '&connectionData=%5B%7B%22name%22%3A%22sshtermhub%22%7D%5D&_=' + str(ts),
+)
+ts += 1
+# antixss = r.cookies['antixss'].split('-')[-1]
+
+global proxyConnectionId
+global senddata_iterator
+global heartbit_iterator
+senddata_iterator = 1
+proxyConnectionId = None
+
+def resizecheck():
+    global screenheight
+    global screenwidth
+    global proxyConnectionId
+    h, w = get_terminal_size_linux()
+    if h != screenheight or w != screenwidth:
+        screenheight,screenwidth = h,w
+        m=json.dumps({"H":"sshtermhub","M":"resize","A":[proxyConnectionId,screenwidth,screenheight],"I":heartbit_iterator})
+        logging.debug("| <= %s" % m)
+        ws.send(m)
+
+def on_message(ws, message):
+    global proxyConnectionId
+    global heartbit_iterator
+    global screenheight
+    global screenwidth
+    logging.debug('  => %s' % message)
+    jm=json.loads(message)
+    if 'S' in jm:
+        screenheight, screenwidth = get_terminal_size_linux()
+        m=json.dumps({"H":"sshtermhub","M":"startPVSession","A":[appkey,screenwidth,screenheight,challengeSessionId],"I":0})	
+        logging.debug("R <= %s" % m)
+        ws.send(m)
+    elif 'R' in jm:
+        if jm['R'] != True and 'ProxyConnectionId' in jm['R']:
+            proxyConnectionId = jm['R']['ProxyConnectionId']
+        if 'I' in jm:
+            heartbit_iterator = int(jm['I']) + 1
+            def sendHeartBeat(id, i, s=0):
+                global heartbit_iterator
+                m=json.dumps({"H":"sshtermhub","M":"termHeartBeat","A":[id],"I": i})
+                time.sleep(s)
+                if heartbit_iterator == i:
+                    logging.debug("I <= %s, %d=%d" % (m, heartbit_iterator, i))
+                    ws.send(m)
+                else:
+                    # ignore heartbeat if already send reize event
+                    logging.debug("0 <= None, %d!=%d" % (heartbit_iterator, i))
+            if proxyConnectionId:
+                if heartbit_iterator <= 1:
+                    sendHeartBeat(proxyConnectionId, heartbit_iterator, 0)
+                else:
+                    thread.start_new_thread(sendHeartBeat, (proxyConnectionId, heartbit_iterator, 5))
+    if "M" in jm:
+        for m in jm["M"]:
+            if "M" in m and m["M"] == "haveSomeData" and "A" in m:
+                if len(m["A"]) > 0:
+                    a,_ = m["A"]
+                    printc(a)
+            elif "M" in m and m["M"] == "sessionClosed":
+                sys.exit(0)
+                    
+def signal_handler(signal, frame):
+    sendKey('\x03')
+    # sendKey('\u0003')
+
+def sendKey(key):
+    global senddata_iterator
+    global proxyConnectionId
+    if proxyConnectionId:
+        m=json.dumps({"H":"sshtermhub","M":"sendData","A":[proxyConnectionId,key,senddata_iterator],"I":senddata_iterator})
+        senddata_iterator += 1
+        logging.debug("I <= %s" % m)
+        ws.send(m)
+    pass
+
+
+def on_error(ws, error):
+    logging.error('error happened .. ')
+    logging.error(error)
+
+
+def on_close(ws):
+    logging.debug("### closed ###")
+
+def on_open(ws):
+    def run():
+        logging.debug("listening for keys")
+        with Input(keynames='bytes') as input_generator:
+            for e in input_generator:
+                logging.debug("Captured '%s' key" % repr(e).strip("'"))
+                sendKey(e)
+    def resizer():
+        while True:
+            time.sleep(1)
+            resizecheck()
+    thread.start_new_thread(run, ())
+    thread.start_new_thread(resizer, ())
+
+addr = 'wss://' + centrify_address + '/signalr/connect?transport=webSockets&clientProtocol=1.5&connectionToken='+ connectiontoken + '&connectionData=' + urllib.quote('[{"name":"sshtermhub"}]') + '&tid=1'
+
+ws = websocket.WebSocketApp(
+                            addr,
+                            # on_open    = on_open,
+                            on_message = on_message,
+                            on_error   = on_error,
+                            on_close   = on_close, 
+                            header     = {'Cookie:%s' % "; ".join([str(x)+"="+str(y) for x,y in session.cookies.items()])} 
+                           )
+
+ws.on_open = on_open
+logging.debug("setting up terminal emulator")
+
+logging.debug("preparing websocket connect, switching to file log")
+for handler in logging.root.handlers[:]:
+    logging.root.removeHandler(handler)
+logging.basicConfig(filename="ssh.log",level=logging.ERROR, format='%(asctime)s %(message)s')
+logging.debug("websocket connect")
+
+logging.debug("redefining ctrl-c signal")
+signal.signal(signal.SIGINT, signal_handler)
+
+ws.run_forever()
