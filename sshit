@@ -411,10 +411,10 @@ ws = websocket.WebSocketApp(
 ws.on_open = on_open
 logging.debug("setting up terminal emulator")
 
-logging.debug("preparing websocket connect, switching to file log")
-for handler in logging.root.handlers[:]:
-    logging.root.removeHandler(handler)
-logging.basicConfig(filename="ssh.log",level=logging.ERROR, format='%(asctime)s %(message)s')
+# logging.debug("preparing websocket connect, switching to file log")
+# for handler in logging.root.handlers[:]:
+#     logging.root.removeHandler(handler)
+# logging.basicConfig(filename="ssh.log",level=logging.ERROR, format='%(asctime)s %(message)s')
 logging.debug("websocket connect")
 
 logging.debug("redefining ctrl-c signal")
