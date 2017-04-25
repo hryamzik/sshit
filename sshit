@@ -361,9 +361,12 @@ def on_message(ws, message):
                 os.system('stty sane')
                 sys.exit(0)
                     
-def signal_handler(signal, frame):
+def sigint_handler(signal, frame):
     sendKey('\x03')
     # sendKey('\u0003')
+
+def sigtstp_handler(signal, frame):
+    sendKey("\u001a")
 
 def sendKey(key):
     global senddata_iterator
@@ -419,6 +422,7 @@ logging.debug("setting up terminal emulator")
 logging.debug("websocket connect")
 
 logging.debug("redefining ctrl-c signal")
-signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGINT, sigint_handler)
+signal.signal(signal.SIGTSTP, sigtstp_handler)
 
 ws.run_forever()
