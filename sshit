@@ -40,6 +40,7 @@ else:
     sys.exit(1)
 
 logging.basicConfig(level=logging.ERROR, format='%(asctime)s %(message)s')
+# logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(message)s')
 logging.debug('Starting in %s mode...' % mode)
 
 confdir = "~/.centrify"
@@ -185,26 +186,95 @@ for challange in r.json()['Result']['Challenges']:
         elif mechanism['Name'] == "OATH":
             oauthMechanismId = mechanism['MechanismId']
 
-logging.debug("Send login data")
+logging.debug("Send password data")
 r = session.post(
     "https://" + centrify_address + "/Security/AdvanceAuthentication?antixss=%s" % antixss,
     json={
-    "TenantId": tenantId,
-    "SessionId": sessionID,
-    "PersistentLogin": True,
-    "MultipleOperations": [
-        {
-            "MechanismId": passMechanismId,
-            "Answer": getPass(),
-            "Action": "Answer"
-        },
-        {
-            "MechanismId": oauthMechanismId,
-            "Answer": getToken(),
-            "Action": "Answer"
-        }
-    ]
-   }
+        "Action": "Answer",
+        "Answer": getPass(),
+        "MechanismId": passMechanismId,
+        "PersistentLogin": True,
+        "SessionId": sessionID,
+        "TenantId": tenantId,
+    }
+)
+
+r.raise_for_status()
+
+logging.debug("Password result: %s" % r.content)
+
+logging.debug("Start next challenge request")
+r = session.post(
+    "https://" + centrify_address + "/Security/AdvanceAuthentication?antixss=%s" % antixss,
+    json={
+        "Action": "StartOOB",
+        "MechanismId": oauthMechanismId,
+        "PersistentLogin": True,
+        "SessionId": sessionID,
+        "TenantId": tenantId,
+    }
+)
+
+r.raise_for_status()
+
+logging.debug("Start next challenge result: %s" % r.content)
+
+logging.debug("Send auth code")
+r = session.post(
+    "https://" + centrify_address + "/Security/AdvanceAuthentication?antixss=%s" % antixss,
+    json={
+        "TenantId": tenantId,
+        "SessionId": sessionID,
+        "PersistentLogin": True,
+        "MechanismId": oauthMechanismId,
+        "Answer": getToken(),
+        "Action": "Answer"
+    }
+)
+
+r.raise_for_status()
+
+logging.debug("Auth challenge result: %s" % r.content)
+
+# looks depricated
+# logging.debug("Send logn data")
+# r = session.post(
+#     "https://" + centrify_address + "/Security/AdvanceAuthentication?antixss=%s" % antixss,
+#     json={
+#     "TenantId": tenantId,
+#     "SessionId": sessionID,
+#     "PersistentLogin": True,
+#     "MultipleOperations": [
+#         {
+#             "MechanismId": passMechanismId,
+#             "Answer": getPass(),
+#             "Action": "Answer"
+#         },
+#         {
+#             "MechanismId": oauthMechanismId,
+#             "Answer": getToken(),
+#             "Action": "Answer"
+#         }
+#     ]
+#    }
+# )
+# r.raise_for_status()
+
+loginjson = r.json()
+if "success" in loginjson:
+    logging.debug("Login result: %s" % loginjson["success"])
+    if not loginjson["success"]:
+        logging.error(json.dumps(loginjson, indent=4, sort_keys=True))
+        sys.exit(1)
+
+antixss = r.cookies['antixss'].split('-')[-1]
+
+logging.debug("Make another auth request")
+r = session.get(
+    "https://" + centrify_address + "?Auth=%s" % antixss,
+    json={
+        "force": True,
+    }
 )
 
 antixss = r.cookies['antixss'].split('-')[-1]
@@ -217,7 +287,8 @@ r = session.post(
     }
 )
 
-antixss = r.cookies['antixss'].split('-')[-1]
+r.raise_for_status()
+# antixss = r.cookies['antixss'].split('-')[-1]
 
 apps=r.json()['Result']['Apps']
         
@@ -378,6 +449,7 @@ def sendKey(key):
         ws.send(m)
     pass
 
+# {"H":"sshtermhub","M":"sendData","A":["10631ab9-8e44-4ee6-8600-860d0c38b8e6|e1d1d3c0-c1c3-4038-b9e7-25f9dc0f3c22","ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG5lxn6uKeS4OJapxy8V8WJU9THkPyiFJPeVjWLyIsdY",2],"I":7}	
 
 def on_error(ws, error):
     logging.error('error happened .. ')
